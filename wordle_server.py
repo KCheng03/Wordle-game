@@ -1,8 +1,15 @@
 import socket
+import threading
 import random
+import time
+from select import select
 
-# Max rounds before game over
+# Max attempts before round over
 max_attempts = 6
+
+# Max rounds before room close
+max_rounds = 2
+
 
 # List of 5-letter words (you can expand this list)
 word_list = [
@@ -13,6 +20,21 @@ word_list = [
     "urban", "vigor", "waltz", "xenon", "yacht", "zebra"
 ]
 
+# ASCII art of slime
+enemy = "*       %*-------==#%       \n    %-:  .:--------=+=#    \n   +-..:------------==++   \n  *-..---------------===*  \n  -:.:----------------=+-  \n %-------*%------**---===* \n +-..----%%------%*---==+- \n@=--------------------=++-@\n#==------------------==+=-+\n*=====------------====*+=-+\n@+=+++=============+++=-:=@\n  @@@@@@@@@@@@@@@@@@@@@@@"
+
+HOST = '127.0.0.1'
+PORT = 65432
+
+# Data structure to manage rooms
+rooms = {}  # {room_code: {'clients': [], 'game_in_progress': bool, 'secret_word': str, 'current_turn': int, 
+            # 'current_health': int, 'rounds_played': int, 'max_rounds': int, 'total_score': int}}
+
+# Data structure to manage data
+data = {}  # {conn: str}
+
+lock = threading.Lock()
+
 def get_feedback(guess, secret):
     feedback = [''] * 5
     secret_chars = list(secret)
@@ -21,7 +43,7 @@ def get_feedback(guess, secret):
     # First pass: check for correct letters in correct position
     for i in range(5):
         if guess_chars[i] == secret_chars[i]:
-            feedback[i] = '🟩'  # Green
+            feedback[i] = '0'  # Green
             secret_chars[i] = None  # Mark as used
             guess_chars[i] = None
         else:
@@ -31,60 +53,191 @@ def get_feedback(guess, secret):
     for i in range(5):
         if guess_chars[i] is not None:
             if guess_chars[i] in secret_chars:
-                feedback[i] = '🟨'  # Orange
+                feedback[i] = '?'  # Orange
                 secret_index = secret_chars.index(guess_chars[i])
                 secret_chars[secret_index] = None  # Mark as used
             else:
-                feedback[i] = '⬜'  # White
+                feedback[i] = '_'  # White
 
     return ''.join(feedback)
 
-def validate_guess(guess):
-    return len(guess) == 5 and guess.isalpha()
+def handle_client(conn, addr):
+    try:
+        conn.sendall(b"Welcome! Enter room code to join or create: ")
+        room_code = conn.recv(1024).decode().strip()
 
-def start_server(host='127.0.0.1', port=65432):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, port))
-        s.listen()
-        print(f"Server listening on {host}:{port}")
-        conn, addr = s.accept()
-        with conn:
-            print(f"Connected by {addr}")
-            secret_word = random.choice(word_list)
-            attempts_left = max_attempts
-            conn.sendall(f"Welcome to Wordle!\nGuess the 5-letter word. You have {attempts_left} attempts.\n".encode())
-            # The server does not reveal the secret to the client.
+        with lock:
+            if room_code not in rooms:
+                # Create new room
+                rooms[room_code] = {
+                    'clients': [],
+                    'game_in_progress': False,
+                    'secret_word': None,
+                    'current_turn': 0,
+                    'current_health': max_attempts,
+                    'rounds_played': 0,
+                    'max_rounds': max_rounds,
+                    'total_score': 0,
+                }
+            if rooms.get(room_code)['game_in_progress']:
+                conn.sendall(f"Game in progress. Not accepting new client.\n".encode())
+                return
+            rooms[room_code]['clients'].append(conn)
+            conn.sendall(f"Joined room {room_code}. Waiting for start command.\n".encode())
 
-            while attempts_left > 0:
-                data = conn.recv(1024)
-                if not data:
+        while True:
+            with lock:
+                room = rooms.get(room_code)
+                if room is None:
+                    break  # Room closed
+
+                # Start game if not in progress and someone types 'start'
+                if not room['game_in_progress']:
+                    conn.sendall(f"{len(room['clients'])} clients in the room.\n".encode())
+                    if conn == room['clients'][0]:
+                        conn.sendall(b"Type 'start' to begin the game. Type 'r' to refresh.\n")
+            
+            # Receive input
+            data[conn] = conn.recv(1024)
+            if not data[conn]:
+                conn.sendall(b"Data lost. Try again.\n")
+                continue
+            message = data[conn].decode().strip()
+            print(conn, message, flush=True)
+
+            with lock:
+                room = rooms.get(room_code)
+                if room is None:
+                    conn.sendall(b"Room closed unexpectedly.\n")
                     break
-                guess = data.decode().strip().lower()
 
-                # Validate input
-                if not validate_guess(guess):
-                    conn.sendall(b"Invalid guess. Enter a 5-letter word.\n")
+                # Handle start command
+                if not room['game_in_progress'] and message.lower() == 'start':
+                    # Initialize game
+                    room['secret_word'] = random.choice(word_list)
+                    room['game_in_progress'] = True
+                    room['current_turn'] = 0
+                    room['current_health'] = max_attempts
+                    room['rounds_played'] += 1
+                    # Notify all clients
+                    for c in room['clients']:
+                        c.sendall(b"Game starting!\n")
+                        time.sleep(0.2)
+                        c.sendall(f"Enemy appears!\n".encode())
+                        time.sleep(1)
+                        c.sendall(f"\n{enemy}\n*\n".encode())
+                        time.sleep(0.2)
+                        c.sendall(f"Guess the 5-letter word to attack. You have {room['current_health']} attempts.\n".encode())
+                        
+                        # Prompt first player to start
+                        if c != room['clients'][room['current_turn']]:
+                            c.sendall(b"Waiting for your turn...\n")
+                        else:
+                            c.sendall(b"Your turn! Enter your guess:\n")
+                    continue
+                elif not room['game_in_progress']:
+                    # Waiting for start
                     continue
 
-                # Optional: check if guess is in the word list
-                if guess not in word_list:
-                    conn.sendall(b"Word not in list. Try again.\n")
+                # Game in progress
+                current_client = room['clients'][room['current_turn']]
+                if conn != current_client:
+                    # Not this client's turn
+                    conn.sendall(b"Waiting for your turn...\n")
                     continue
-
-                feedback = get_feedback(guess, secret_word)
-                conn.sendall(feedback.encode() + b"\n")
-
-                if guess == secret_word:
-                    conn.sendall(b"Congratulations! You guessed the word.\n")
-                    break
                 else:
-                    conn.sendall(b"\n")
+                    # It's this client's turn
+                    # Validate guess
+                    guess = message.lower()
+                    if len(guess) != 5 or not guess.isalpha():
+                        conn.sendall(b"Invalid guess. Enter a 5-letter word.\n")
+                        continue
+                    if guess not in word_list:
+                        conn.sendall(b"Word not in list. Try again.\n")
+                        continue
 
-                attempts_left -= 1
+                    feedback = get_feedback(guess, room['secret_word'])
+                    # Send feedback to all clients
+                    for c in room['clients']:
+                        c.sendall(f"Guess: {guess}    Feedback: {feedback}\n".encode())
 
+                    if guess == room['secret_word']:
+                        # Win
+                        room['total_score'] += 1
+                        for c in room['clients']:
+                            c.sendall(b"Congratulations! You guessed the word.\n")
+                            time.sleep(1)
+                            c.sendall(b"Enemy defeated. You gained one point!\n")
+                            time.sleep(2)
+                    else:
+                        # Game over check
+                        room['current_health'] -= 1
+                        if room['current_health'] < 1:
+                            for c in room['clients']:
+                                # Out of attempts
+                                c.sendall(f"Enemy escaped! The word was '{room['secret_word']}'.\n".encode())
+                                time.sleep(2)
+                        else:
+                            # Next turn
+                            room['current_turn'] = (room['current_turn'] + 1) % len(room['clients'])
+                            # Prompt next player
+                            room['clients'][room['current_turn']].sendall(b"Your turn! Enter your guess:\n")
+                            continue
+                    
+                    # Prepare for next round or close
+                    # room['game_in_progress'] = False       
+                    if room['rounds_played'] >= room['max_rounds']:
+                        for c in room['clients']:
+                            c.sendall(f"Your total score is {room['total_score']}!\n".encode())
+                            c.sendall(b"Room closed. Thanks for playing!\n")
+                        time.sleep(5)
+                        for c in room['clients']:
+                            c.close()
+                        del rooms[room_code]
+                    else:
+                        # Start new game
+                        room['secret_word'] = random.choice(word_list)
+                        room['current_turn'] = 0
+                        room['current_health'] = max_attempts
+                        room['rounds_played'] += 1
+                        for c in room['clients']:
+                            c.sendall(b"Next round starting!\n")
+                            time.sleep(0.2)
+                            c.sendall(f"Enemy appears!\n".encode())
+                            time.sleep(1)
+                            c.sendall(f"\n{enemy}\n*\n".encode())
+                            time.sleep(0.2)
+                            c.sendall(f"Guess the 5-letter word to attack. You have {room['current_health']} attempts.\n".encode())
+                            # Prompt first player to start
+                            if c != room['clients'][room['current_turn']]:
+                                c.sendall(b"Waiting for your turn...\n")
+                            else:
+                                c.sendall(b"Your turn! Enter your guess:\n")
+    except Exception as e:
+        print(f"Error handling client {addr}: {e}", flush=True)
+    finally:
+        # Remove client
+        with lock:
+            for room_code, room in list(rooms.items()):
+                if conn in room['clients']:
+                    room['clients'].remove(conn)
+                    if not room['clients']:
+                        del rooms[room_code]
+        conn.close()
+
+def main():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen()
+        print(f"Server listening on {HOST}:{PORT}")
+        while True:
+            ready, _, _ = select([s], [], [], 1) #Timeout set to 1 seconds
+            if ready:
+                conn, addr = s.accept()
+                threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
             else:
-                # Out of attempts
-                conn.sendall(f"Game over! The word was '{secret_word}'.\n".encode())
+                pass
+            
 
 if __name__ == "__main__":
-    start_server()
+    main()

@@ -1,40 +1,27 @@
 import socket
 
 def main():
-    host = '127.0.0.1'
-    port = 65432
+    HOST = '127.0.0.1'
+    PORT = 65432
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((host, port))
-        # Receive welcome message
-        data = s.recv(1024)
-        print(data.decode())
-
+        s.connect((HOST, PORT))
         while True:
-            guess = input("Enter your 5-letter guess: ").lower()
-
-            # Send guess to server
-            s.sendall(guess.encode())
-
-            # Receive feedback
-            feedback = s.recv(1024).decode().strip()
-
-            # Check for validation messages
-            if "Invalid guess" in feedback or "Try again" in feedback:
-                print(feedback)
-                continue
-
-            # Print feedback
-            print(feedback)
-
-            # Receive end game check
-            check = s.recv(1024).decode().strip()
-
-            # Check for win or game over messages
-            # Print end game message
-            if "Congratulations" in check or "Game over" in check:
-                print(check)
+            data = s.recv(1024).decode()
+            if not data:
                 break
+            print(data.strip())
+
+            # Break on game over / room closed
+            if "Thanks for playing" in data or "Game over" in data:
+                break
+
+            # Prompt for input if needed
+            if ("Enter" in data) or ("Your turn" in data) or ("type 'start'" in data.lower()) or ("Invalid guess" in data) or ("Try again" in data):
+                user_input = None
+                while not user_input:
+                  user_input = input()
+                s.sendall(user_input.encode())
 
 if __name__ == "__main__":
     main()
