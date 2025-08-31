@@ -3,6 +3,7 @@ import threading
 import random
 import time
 from select import select
+import wordle_cheat_host as wch
 
 # Max attempts before round over
 max_attempts = 6
@@ -20,7 +21,10 @@ word_list = [
     "urban", "vigor", "waltz", "xenon", "yacht", "zebra"
 ]
 
-# ASCII art of slime
+# word_list = [
+#     "hello", "world", "quite", "fancy", "fresh", "panic", "crazy", "buggy", "scare",
+# ]
+
 enemy = "*       %*-------==#%       \n    %-:  .:--------=+=#    \n   +-..:------------==++   \n  *-..---------------===*  \n  -:.:----------------=+-  \n %-------*%------**---===* \n +-..----%%------%*---==+- \n@=--------------------=++-@\n#==------------------==+=-+\n*=====------------====*+=-+\n@+=+++=============+++=-:=@\n  @@@@@@@@@@@@@@@@@@@@@@@"
 
 HOST = '127.0.0.1'
@@ -28,7 +32,7 @@ PORT = 65432
 
 # Data structure to manage rooms
 rooms = {}  # {room_code: {'clients': [], 'game_in_progress': bool, 'secret_word': str, 'current_turn': int, 
-            # 'current_health': int, 'rounds_played': int, 'max_rounds': int, 'total_score': int}}
+            # 'current_health': int, 'rounds_played': int, 'max_rounds': int, 'total_score': int, 'possible_words': List}}
 
 # Data structure to manage data
 data = {}  # {conn: str}
@@ -78,6 +82,7 @@ def handle_client(conn, addr):
                     'rounds_played': 0,
                     'max_rounds': max_rounds,
                     'total_score': 0,
+                    'possible_words': None,
                 }
             if rooms.get(room_code)['game_in_progress']:
                 conn.sendall(f"Game in progress. Not accepting new client.\n".encode())
@@ -114,11 +119,12 @@ def handle_client(conn, addr):
                 # Handle start command
                 if not room['game_in_progress'] and message.lower() == 'start':
                     # Initialize game
-                    room['secret_word'] = random.choice(word_list)
+                    room['secret_word'] = "!!!!!"
                     room['game_in_progress'] = True
                     room['current_turn'] = 0
                     room['current_health'] = max_attempts
                     room['rounds_played'] += 1
+                    room["possible_words"] = word_list.copy()
                     # Notify all clients
                     for c in room['clients']:
                         c.sendall(b"Game starting!\n")
@@ -156,6 +162,15 @@ def handle_client(conn, addr):
                         conn.sendall(b"Word not in list. Try again.\n")
                         continue
 
+                    # Filter possible words based on guess
+                    room['possible_words'], new = wch.filter_word_list(room['possible_words'], guess)
+
+                    # Choose next secret with minimal '0' and '?'
+                    # Select secret if word list can't be further filtered
+                    room['secret_word'] = wch.choose_next_secret(guess, room['possible_words'])
+                    if not new:
+                        room['possible_words'] = [room['secret_word']]
+                    
                     feedback = get_feedback(guess, room['secret_word'])
                     # Send feedback to all clients
                     for c in room['clients']:
@@ -196,10 +211,11 @@ def handle_client(conn, addr):
                         del rooms[room_code]
                     else:
                         # Start new game
-                        room['secret_word'] = random.choice(word_list)
+                        room['secret_word'] = "!!!!!"
                         room['current_turn'] = 0
                         room['current_health'] = max_attempts
                         room['rounds_played'] += 1
+                        room["possible_words"] = word_list.copy()
                         for c in room['clients']:
                             c.sendall(b"Next round starting!\n")
                             time.sleep(0.2)
